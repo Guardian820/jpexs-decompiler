@@ -16,6 +16,44 @@
  */
 package com.jpexs.decompiler.flash.console;
 
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.awt.print.PageFormat;
+import java.awt.print.Paper;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FilenameFilter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.StringReader;
+import java.io.UnsupportedEncodingException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.Set;
+import java.util.Stack;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
 import com.jpexs.decompiler.flash.AbortRetryIgnoreHandler;
 import com.jpexs.decompiler.flash.ApplicationInfo;
 import com.jpexs.decompiler.flash.EventListener;
@@ -38,8 +76,10 @@ import com.jpexs.decompiler.flash.abc.avm2.parser.pcode.MissingSymbolHandler;
 import com.jpexs.decompiler.flash.abc.avm2.parser.script.ActionScript3Parser;
 import com.jpexs.decompiler.flash.abc.types.Decimal;
 import com.jpexs.decompiler.flash.abc.types.Float4;
+import com.jpexs.decompiler.flash.abc.types.InstanceInfo;
 import com.jpexs.decompiler.flash.abc.types.MethodBody;
 import com.jpexs.decompiler.flash.abc.types.traits.Trait;
+import com.jpexs.decompiler.flash.abc.types.traits.TraitMethodGetterSetter;
 import com.jpexs.decompiler.flash.action.parser.ActionParseException;
 import com.jpexs.decompiler.flash.action.parser.pcode.ASMParser;
 import com.jpexs.decompiler.flash.action.parser.script.ActionScript2Parser;
@@ -162,44 +202,8 @@ import com.jpexs.process.Process;
 import com.jpexs.process.ProcessTools;
 import com.sun.jna.Platform;
 import com.sun.jna.platform.win32.Kernel32;
+
 import gnu.jpdf.PDFJob;
-import java.awt.Color;
-import java.awt.Graphics;
-import java.awt.image.BufferedImage;
-import java.awt.print.PageFormat;
-import java.awt.print.Paper;
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.FilenameFilter;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.PrintStream;
-import java.io.PrintWriter;
-import java.io.StringReader;
-import java.io.UnsupportedEncodingException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-import java.util.Stack;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  *
@@ -2933,8 +2937,19 @@ public class CommandLineArgumentParser {
                                             badArguments("replace");
                                         }
 
-                                        int bodyIndex = Integer.parseInt(args.pop());
+                                        String qualifiedName = args.pop();
                                         ABC abc = pack.abc;
+
+                                        Optional<Integer> bodyIndexOptional = findMethodInfoByQualifiedMethodName(
+                                                abc, qualifiedName).map(abc::findBodyIndex);
+
+                                        if(!bodyIndexOptional.isPresent()) {
+                                            System.out.println(
+                                                    qualifiedName + " was not found. Use full name with namespace (ex: com.jpexs.HelloWorld:helloWorld).");
+                                        }
+
+                                        int bodyIndex = bodyIndexOptional.get();
+
                                         List<Trait> resultTraits = abc.getMethodIndexing().findMethodTraits(pack, bodyIndex);
 
                                         //int classIndex = 0;
@@ -3496,6 +3511,31 @@ public class CommandLineArgumentParser {
         src.setModified();
     }
 
+    private static Optional<Integer> findMethodInfoByQualifiedMethodName(ABC abc, String qualifiedMethodName) {
+
+        String instanceName = qualifiedMethodName.substring(0, qualifiedMethodName.lastIndexOf(":"));
+        String methodName = qualifiedMethodName.substring(qualifiedMethodName.lastIndexOf(":") + 1);
+
+        Optional<InstanceInfo> instanceInfoOptional =
+                abc.instance_info.stream()
+                                 .filter(instanceInfo -> instanceName.equals(
+                                         instanceInfo.getName(abc.constants)
+                                                     .getNameWithNamespace(abc.constants, true)
+                                                     .toString()))
+                                 .findAny();
+
+        Optional<Trait> traitOptional = instanceInfoOptional.flatMap(
+                instance -> instance.instance_traits.traits.stream()
+                                                           .filter(trait -> methodName.equals(
+                                                                   trait.getName(abc)
+                                                                        .getNameWithNamespace(
+                                                                                abc.constants, true)
+                                                                        .toString()))
+                                                           .findFirst());
+
+        return traitOptional.map(trait -> ((TraitMethodGetterSetter) trait).method_info);
+    }
+
     private static void replaceAS3PCode(String text, ABC abc, int bodyIndex, Trait trait) throws IOException, InterruptedException {
         System.out.println("Replace AS3 PCode");
         if (text.trim().startsWith(Helper.hexData)) {
@@ -3504,44 +3544,8 @@ public class CommandLineArgumentParser {
             mb.setCodeBytes(data);
         } else {
             try {
-                AVM2Code acode = ASM3Parser.parse(abc, new StringReader(text), trait, new MissingSymbolHandler() {
-                    //no longer ask for adding new constants
-                    @Override
-                    public boolean missingString(String value) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean missingInt(long value) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean missingUInt(long value) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean missingDouble(double value) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean missingDecimal(Decimal value) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean missingFloat(float value) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean missingFloat4(Float4 value) {
-                        return true;
-                    }
-
-                }, abc.bodies.get(bodyIndex), abc.method_info.get(abc.bodies.get(bodyIndex).method_info));
+                AVM2Code acode = parseASM3(text, abc, bodyIndex, trait);
+                System.out.println(abc.method_info.get(abc.bodies.get(bodyIndex).method_info).getName(abc.constants));
                 //acode.getBytes(abc.bodies.get(bodyIndex).getCodeBytes());
                 abc.bodies.get(bodyIndex).setCode(acode);
             } catch (AVM2ParseException ex) {
@@ -3550,6 +3554,48 @@ public class CommandLineArgumentParser {
             }
         }
         ((Tag) abc.parentTag).setModified(true);
+    }
+
+    private static AVM2Code parseASM3(String text, ABC abc, int bodyIndex, Trait trait)
+            throws IOException, AVM2ParseException, InterruptedException {
+        return ASM3Parser.parse(abc, new StringReader(text), trait, new MissingSymbolHandler() {
+                        //no longer ask for adding new constants
+                        @Override
+                        public boolean missingString(String value) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean missingInt(long value) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean missingUInt(long value) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean missingDouble(double value) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean missingDecimal(Decimal value) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean missingFloat(float value) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean missingFloat4(Float4 value) {
+                            return true;
+                        }
+
+                    }, abc.bodies.get(bodyIndex), abc.method_info.get(abc.bodies.get(bodyIndex).method_info));
     }
 
     private static void replaceAS3(String as, ScriptPack pack) throws IOException, InterruptedException {
